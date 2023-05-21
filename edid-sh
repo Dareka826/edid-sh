@@ -169,7 +169,7 @@ cmd_write_edid() {
 
     # Check if new file is ok
     [ -f "${1}" ] && [ -s "${1}" ]
-    DATA="$(cat "${1}" | tr -d '\n')"
+    DATA="$(cat "${1}" | tr -d '\n \t')"
 
     validate_hex_string  "${DATA}"
     validate_edid_string "${DATA}"
