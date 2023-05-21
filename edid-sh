@@ -1,18 +1,8 @@
 #!/bin/sh
 set -eu
 
+# Ensure root priviledges
 [ "$(id -u)" = "0" ] || { printf "[E]: Not root!\n"; exit 1; }
-
-iscmd() { command -v "${1}" >/dev/null 2>&1; }
-iscmd "i2cget" || exit 1
-iscmd "i2cset" || exit 1
-
-load_i2c_modules() {
-    lsmod | grep i2c-dev   >/dev/null 2>&1 || modprobe i2c-dev
-    lsmod | grep i2c-i801  >/dev/null 2>&1 || modprobe i2c-i801
-    lsmod | grep i2c-piix4 >/dev/null 2>&1 || modprobe i2c-piix4
-}
-load_i2c_modules
 
 ## Usage {{{
 usage() {
@@ -34,6 +24,9 @@ usage() {
 }
 ## }}}
 
+## Utilities {{{
+iscmd() { command -v "${1}" >/dev/null 2>&1; }
+
 execcmd() {
     if [ "${DRY_RUN}" = "1" ]; then
         printf "%s\n" "${*}"
@@ -41,6 +34,22 @@ execcmd() {
         "${@}"
     fi
 }
+## }}}
+
+## Preparation {{{
+
+# Check for i2c-tools
+iscmd "i2cget" || exit 1
+iscmd "i2cset" || exit 1
+
+# Load i2c modules
+lsmod | grep i2c-dev   >/dev/null 2>&1 || modprobe i2c-dev
+lsmod | grep i2c-i801  >/dev/null 2>&1 || modprobe i2c-i801
+lsmod | grep i2c-piix4 >/dev/null 2>&1 || modprobe i2c-piix4 # Idk if necessary
+
+## }}}
+
+## Functions {{{
 
 validate_hex_string() {
     local STR="${1}"
@@ -132,6 +141,8 @@ write_data() {
             write_byte "${BUS}" "${ADDR}" "0x${BYTE}"
         done
 }
+
+## }}}
 
 ## Commands {{{
 
