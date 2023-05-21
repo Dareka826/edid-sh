@@ -1,0 +1,233 @@
+#!/bin/sh
+set -eu
+
+[ "$(id -u)" = "0" ] || { printf "[E]: Not root!\n"; exit 1; }
+
+iscmd() { command -v "${1}" >/dev/null 2>&1; }
+iscmd "i2cget" || exit 1
+iscmd "i2cset" || exit 1
+
+load_i2c_modules() {
+    lsmod | grep i2c-dev   >/dev/null 2>&1 || modprobe i2c-dev
+    lsmod | grep i2c-i801  >/dev/null 2>&1 || modprobe i2c-i801
+    lsmod | grep i2c-piix4 >/dev/null 2>&1 || modprobe i2c-piix4
+}
+load_i2c_modules
+
+## Usage {{{
+usage() {
+    printf "%s [switches | options] command [command_args...]\n" "${0}"
+    printf "\n"
+    printf "  commands:\n"
+    printf "    read_edid              Dump EDID data as hex values\n"
+    printf "    write_edid HEX_FILE    Overwrite EDID data with values from HEX_FILE\n"
+    printf "\n"
+    printf "  switches:\n"
+    printf "    -d        Enable danger mode (actually write and read)\n"
+    printf "    -n        Dry run (overrides danger mode enable)\n"
+    printf "\n"
+    printf "  options:\n"
+    printf "    -b  BUS_ID\n"
+    printf "          read_edid\n"
+    printf "          write_edid\n"
+    printf "\n"
+}
+## }}}
+
+execcmd() {
+    if [ "${DRY_RUN}" = "1" ]; then
+        printf "%s\n" "${*}"
+    else
+        "${@}"
+    fi
+}
+
+validate_hex_string() {
+    local STR="${1}"
+    shift 1
+
+    [ "$(printf "%s" "${STR}" | tr -d '0-9a-fA-F')" = "" ]
+}
+
+validate_edid_string() {
+    local STR="${1}"
+    shift 1
+
+    if ! validate_hex_string "${STR}"; then
+        printf "[E]: Not a valid hex string!\n"
+        exit 1
+    fi
+
+    if [ "$(printf "%s" "${STR}" | cut -c1-16 | tr 'A-F' 'a-f')" != "00ffffffffffff00" ]; then
+        printf "[E]: Not a valid EDID header!\n"
+        exit 1
+    fi
+}
+
+read_byte() {
+    local BUS="${1}"
+    local DATA_ADDR="${2}" # In decimal
+    shift 2
+
+    [ -n "${BUS}"       ] || exit 1
+    [ -n "${DATA_ADDR}" ] || exit 1
+
+    [ "$(printf "%s\n" "${DATA_ADDR}" | cut -c1-2)" = "0x" ] ||
+        DATA_ADDR="$(printf "0x%02x" "${DATA_ADDR}")"
+
+    execcmd i2cget -y "${BUS}" 0x50 "${DATA_ADDR}" b | sed 's/^0x//'
+}
+
+write_byte() {
+    local BUS="${1}"
+    local DATA_ADDR="${2}"
+    local DATA="${3}"
+    shift 3
+
+    [ -n "${BUS}"       ] || exit 1
+    [ -n "${DATA_ADDR}" ] || exit 1
+    [ -n "${DATA}"      ] || exit 1
+
+    [ "$(printf "%s\n" "${DATA_ADDR}" | cut -c1-2)" = "0x" ] ||
+        DATA_ADDR="$(printf "0x%02x" "${DATA_ADDR}")"
+
+    execcmd i2cset -y "${BUS}" 0x50 "${DATA_ADDR}" "${DATA}" b
+}
+
+dump_edid() {
+    local BUS="${1}"
+    shift 1
+
+    for ADDR in $(seq 0 255); do
+        read_byte "${BUS}" "${ADDR}"
+    done
+}
+
+validate_edid_device() {
+    local BUS="${1}"
+    shift 1
+
+    local HEADER=""
+    for ADDR in $(seq 0 7); do
+        HEADER="${HEADER}$(read_byte "${BUS}" "${ADDR}")"
+    done
+    validate_edid_string "${HEADER}"
+}
+
+write_data() {
+    local BUS="${1}"
+    local DATA="${2}"
+    shift 2
+
+    printf "%s\n" "${DATA}" | fold -w2 | cat -n | \
+        while IFS="$(printf "\t")" read -r LINE_NUM BYTE; do
+            local ADDR="$(( LINE_NUM - 1 ))"
+
+            [ "${ADDR}" -le 7 ] && continue
+            [ "${ADDR}" -ge 256 ] && {
+                printf "[W]: More than 256 bytes supplied, stopping now.\n"
+                exit 0
+            }
+
+            write_byte "${BUS}" "${ADDR}" "0x${BYTE}"
+        done
+}
+
+## Commands {{{
+
+cmd_read_edid() {
+    [ -n "${OPT_B}" ] || { printf "[E]: No bus specified!\n"; exit 1; }
+
+    if [ "${DRY_RUN}" = "0" ]; then
+        dump_edid "${OPT_B}" | tr -d '\n'
+        printf "\n"
+    else
+        dump_edid "${OPT_B}"
+    fi
+}
+
+cmd_write_edid() {
+    [ "${#}" -ge 1 ] || { usage; exit 1; }
+    [ -n "${OPT_B}" ] || { printf "[E]: No bus specified!\n"; exit 1; }
+
+    # Check if target device has an EDID header on it
+    [ "${DRY_RUN}" = "1" ] || \
+        validate_edid_device "${OPT_B}"
+
+    local DATA
+
+    # Check if new file is ok
+    [ -f "${1}" ] && [ -s "${1}" ]
+    DATA="$(cat "${1}" | tr -d '\n')"
+
+    validate_hex_string  "${DATA}"
+    validate_edid_string "${DATA}"
+
+    # Write
+    printf "[W]: Really write? (N/y): "
+    local ANS
+    read -r ANS
+
+    [ "${ANS}" = "y" ] || exit 0
+
+    printf "[I]: Writing...\n"
+
+    write_data "${OPT_B}" "${DATA}"
+}
+
+## }}}
+
+## MAIN {{{
+
+# Check for args
+[ "${#}" -gt 0 ] || { usage; exit 0; }
+
+# Switches
+SWC_D="0" # Danger mode (opposite of dry-run)
+SWC_N="0" # Dry run (disables danger mode)
+
+# Options
+OPT_B="" # i2c bus
+
+# Parse options
+while [ "${#}" -gt 0 ]; do
+    case "${1}" in
+
+        # Switches
+        "-d") SWC_D="1"
+              shift 1
+              ;;
+
+        "-n") SWC_N="1"
+              shift 1
+              ;;
+
+        # Options
+        "-b") [ "${#}" -ge 2 ] || exit 1
+              OPT_B="${2}"
+              shift 2
+              ;;
+
+           *) break ;;
+    esac
+done
+
+DRY_RUN="1"
+if [ "${SWC_D}" = "1" ] && [ "${SWC_N}" = "0" ]; then
+    DRY_RUN="0"
+fi
+
+# Check for command
+[ "${#}" -gt 0 ] || { usage; exit 1; }
+
+CMDNAME="${1}"
+if iscmd "cmd_${CMDNAME}"; then
+    shift 1
+    "cmd_${CMDNAME}" "${@}"
+else
+    printf "[E]: No such command: %s\n" "${CMDNAME}"
+    usage
+    exit 1
+fi
+
+## }}}
